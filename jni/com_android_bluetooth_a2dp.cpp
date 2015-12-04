@@ -52,10 +52,15 @@ static void bta2dp_connection_state_callback(btav_connection_state_t state, bt_b
 
     ALOGI("%s", __FUNCTION__);
 
+    if (mCallbacksObj == NULL) {
+        ALOGE("Callbacks Obj is no more valid: '%s", __FUNCTION__);
+        return;
+    }
     if (!checkCallbackThread()) {                                       \
         ALOGE("Callback: '%s' is not called on the correct thread", __FUNCTION__); \
         return;                                                         \
     }
+
     addr = sCallbackEnv->NewByteArray(sizeof(bt_bdaddr_t));
     if (!addr) {
         ALOGE("Fail to new jbyteArray bd addr for connection state");
@@ -75,6 +80,10 @@ static void bta2dp_audio_state_callback(btav_audio_state_t state, bt_bdaddr_t* b
 
     ALOGI("%s", __FUNCTION__);
 
+    if (mCallbacksObj == NULL) {
+        ALOGE("Callbacks Obj is no more valid: '%s", __FUNCTION__);
+        return;
+    }
     if (!checkCallbackThread()) {                                       \
         ALOGE("Callback: '%s' is not called on the correct thread", __FUNCTION__); \
         return;                                                         \
@@ -145,6 +154,11 @@ static void initNative(JNIEnv *env, jobject object) {
     if ( (status = sBluetoothA2dpInterface->init(&sBluetoothA2dpCallbacks)) != BT_STATUS_SUCCESS) {
         ALOGE("Failed to initialize Bluetooth A2DP, status: %d", status);
         sBluetoothA2dpInterface = NULL;
+        if (mCallbacksObj != NULL) {
+             ALOGW("Clean up A2DP callback object");
+             env->DeleteGlobalRef(mCallbacksObj);
+             mCallbacksObj = NULL;
+        }
         return;
     }
 }
