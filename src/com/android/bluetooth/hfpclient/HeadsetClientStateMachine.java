@@ -48,6 +48,15 @@ import android.util.Pair;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
+import android.media.AudioDevicePort;
+import android.media.AudioDevicePortConfig;
+import android.media.AudioGain;
+import android.media.AudioGainConfig;
+import android.media.AudioPatch;
+import android.media.AudioPort;
+import android.media.AudioPortConfig;
+import android.media.AudioFormat;
+import android.media.AudioSystem;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.net.Uri;
@@ -142,6 +151,7 @@ final class HeadsetClientStateMachine extends StateMachine {
 
     private int mMaxAmVcVol;
     private int mMinAmVcVol;
+    private int mOutDevVolume;
 
     // queue of send actions (pair action, action_data)
     private Queue<Pair<Integer, Object>> mQueuedActions;
@@ -1228,6 +1238,7 @@ final class HeadsetClientStateMachine extends StateMachine {
         mAudioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         mAudioState = BluetoothHeadsetClient.STATE_AUDIO_DISCONNECTED;
         mAudioWbs = false;
+        mOutDevVolume = mAudioManager.getStreamVolume(AudioManager.STREAM_BLUETOOTH_SCO);
 
         mAudioRouteAllowed = context.getResources().getBoolean(
                 R.bool.headset_client_initial_audio_route_allowed);
@@ -1574,6 +1585,13 @@ final class HeadsetClientStateMachine extends StateMachine {
     }
 
     private class Connected extends State {
+
+        // Audio patch related variables
+        private AudioPatch mAudioPatch = null;
+        private AudioDevicePort mAudioSource = null;
+        private AudioDevicePort mAudioSink = null;
+        private final Object mLockForPatch = new Object();
+
         @Override
         public void enter() {
             Log.d(TAG, "Enter Connected: " + getCurrentMessage().what);
@@ -1885,20 +1903,7 @@ final class HeadsetClientStateMachine extends StateMachine {
                                             HeadsetClientHalConstants.CALL_DIRECTION_OUTGOING);
                             break;
                         case EVENT_TYPE_VOLUME_CHANGED:
-                            if (event.valueInt == HeadsetClientHalConstants.VOLUME_TYPE_SPK) {
-                                Log.d(TAG, "AM volume set to " +
-                                      hfToAmVol(event.valueInt2));
-                                mAudioManager.setStreamVolume(
-                                    AudioManager.STREAM_VOICE_CALL,
-                                    hfToAmVol(event.valueInt2),
-                                    AudioManager.FLAG_SHOW_UI);
-                                mVgsFromStack = true;
-                            } else if (event.valueInt ==
-                                HeadsetClientHalConstants.VOLUME_TYPE_MIC) {
-                                mAudioManager.setMicrophoneMute(event.valueInt2 == 0);
-
-                                mVgmFromStack = true;
-                            }
+                            handleVolumeChange(event.valueInt, event.valueInt2);
                             break;
                         case EVENT_TYPE_CMD_RESULT:
                             Pair<Integer, Object> queuedAction = mQueuedActions.poll();
@@ -2042,6 +2047,85 @@ final class HeadsetClientStateMachine extends StateMachine {
             mService.sendBroadcast(intent, ProfileService.BLUETOOTH_PERM);
         }
 
+        private void handleVolumeChange(int event, int gainValue) {
+
+            if (event == HeadsetClientHalConstants.VOLUME_TYPE_SPK) {
+                mAudioManager.setStreamVolume(AudioManager.STREAM_BLUETOOTH_SCO,
+                                              gainValue, AudioManager.FLAG_SHOW_UI);
+
+                mOutDevVolume = gainValue;
+                int status = applyBTVolume(gainValue);
+
+                if (status != AudioManager.SUCCESS) {
+                    Log.w(TAG, "handleVolumeChange: applyBTVolume returned status " + status);
+                }
+
+                mVgsFromStack = true;
+
+            } else if (event == HeadsetClientHalConstants.VOLUME_TYPE_MIC) {
+                mAudioManager.setMicrophoneMute(gainValue == 0);
+
+                mVgmFromStack = true;
+            }
+        }
+
+        private void releaseAudioPatch() {
+            synchronized (mLockForPatch){
+                if (mAudioPatch != null) {
+                    Log.i(TAG, "releaseAudioPatch");
+                    mAudioManager.releaseAudioPatch(mAudioPatch);
+                    mAudioPatch = null;
+                }
+                mAudioSource = null;
+                mAudioSink = null;
+            }
+        }
+
+        private int applyBTVolume(int btGain) {
+
+            int status = AudioManager.SUCCESS;
+
+            AudioGain sourceGain = null;
+
+            Log.d(TAG, "Connected: applyBTVolume: gain to set: " + btGain);
+
+            for (AudioGain gain : mAudioSource.gains()) {
+                if ((gain.mode() & AudioGain.MODE_JOINT) != 0) {
+                    sourceGain = gain;
+                    break;
+                }
+            }
+
+            if (sourceGain != null) {
+
+                AudioGainConfig sourceGainConfig = null;
+
+                int bt_min = mAudioManager.getStreamMinVolume(AudioManager.STREAM_BLUETOOTH_SCO);
+                int bt_max = mAudioManager.getStreamMaxVolume(AudioManager.STREAM_BLUETOOTH_SCO);
+                int btVolRange = bt_max - bt_min;
+
+                int min = sourceGain.minValue();
+                int max = sourceGain.maxValue();
+
+                Log.d(TAG, "applyBTVolume: stream gains: min: " + min + " max: "+max);
+                Log.d(TAG, "applyBTVolume: bt gains: min: " + bt_min + " max: "+ bt_max);
+
+                int value = min + (((max - min) * btGain) / btVolRange);
+                Log.i(TAG, "applyBTVolume: Set gain to : " + value);
+
+                int[] gainValues = new int[] { (int) value };
+
+                sourceGainConfig = sourceGain.buildConfig(AudioGain.MODE_JOINT,
+                                                          sourceGain.channelMask(),
+                                                          gainValues,
+                                                          0);
+                status = mAudioManager.setAudioPortGain(mAudioSource, sourceGainConfig);
+            } else {
+                Log.w(TAG, "applyBTVolume: cannot set gain to current audio patch");
+            }
+            return status;
+        }
+
         // in Connected state
         private void processConnectionEvent(int state, BluetoothDevice device) {
             switch (state) {
@@ -2131,6 +2215,104 @@ final class HeadsetClientStateMachine extends StateMachine {
             }
         }
 
+        private final AudioManager.OnAudioPortUpdateListener mAudioPortListener =
+            new AudioManager.OnAudioPortUpdateListener() {
+                public void onAudioPortListUpdate(AudioPort[] portList) {
+                    synchronized (mLockForPatch) {
+                        Log.i(TAG, "onAudioPortListUpdate");
+
+                        AudioPortConfig sourcePortConfigArray[] = {null};
+                        AudioPortConfig sinkPortConfigArray[] = {null};
+
+                        boolean sinkChanged = false;
+                        // default to speaker for initialization
+                        int oldAudioSinkType = AudioSystem.DEVICE_OUT_SPEAKER;
+                        AudioDevicePort foundWiredSink = null, foundSpeakerSink = null;
+
+                        for (int i = 0; i < portList.length; i++) {
+                            AudioPort port = portList[i];
+
+                            if (port instanceof AudioDevicePort) {
+                                AudioDevicePort devicePort = (AudioDevicePort)port;
+                                int type = devicePort.type();
+                                String name;
+
+                                if (AudioManager.isInputDevice(type)) {
+                                    name = AudioSystem.getInputDeviceName(type);
+                                } else {
+                                    name = AudioSystem.getOutputDeviceName(type);
+                                }
+                                Log.d(TAG, "Audio Port: "+ name);
+
+                                // gather sink ports of interest: wired headset/phone and speaker
+                                if ((type == AudioSystem.DEVICE_OUT_WIRED_HEADSET) || (type == AudioSystem.DEVICE_OUT_WIRED_HEADPHONE)) {
+                                    foundWiredSink = devicePort;
+                                } else if (type == AudioSystem.DEVICE_OUT_SPEAKER) {
+                                    foundSpeakerSink = devicePort;
+                                } else if (type == AudioSystem.DEVICE_IN_BLUETOOTH_SCO_HEADSET) {
+                                    mAudioSource = devicePort;
+                                    sourcePortConfigArray[0] = devicePort.activeConfig();
+                                    Log.d(TAG, " Source Port updated: "+ name);
+                                }
+                            }
+                        }
+
+                        if (mAudioSink != null) {
+                            oldAudioSinkType = mAudioSink.type();
+                        }
+
+                        // first check if any wired device is connected as sink
+                        // if not, fallback to speaker
+                        if (foundWiredSink != null) {
+                            mAudioSink = foundWiredSink;
+                        } else if (foundSpeakerSink != null) {
+                            mAudioSink = foundSpeakerSink;
+                        }
+
+                        if ((mAudioSink == null) || (mAudioSource == null)) {
+                            Log.e(TAG, "Unable to create AudioPatch due to missing source or sink");
+                            return;
+                        }
+
+                        AudioPatch[] audioPatchArray = new AudioPatch[] { null };
+
+                        // potentially update audio patch
+                        audioPatchArray[0] = mAudioPatch;
+
+                        sinkPortConfigArray[0] = mAudioSink.activeConfig();
+
+                        // create audio patch if it is not created yet, or update it if
+                        // sink type changed
+                        if ((mAudioPatch == null) || (mAudioSink.type() != oldAudioSinkType)) {
+                            int status = mAudioManager.createAudioPatch(audioPatchArray,
+                                                                        sourcePortConfigArray,
+                                                                        sinkPortConfigArray);
+
+                            if (status == AudioManager.SUCCESS) {
+                                mAudioPatch = audioPatchArray[0];
+                                Log.i(TAG, "AudioPatch successfully created: " + mAudioPatch.toString());
+                            } else {
+                                Log.e(TAG, "Failed to create AudioPatch: err= " + status);
+                            }
+
+                            /* Apply current BT volume (default) */
+                            applyBTVolume(mOutDevVolume);
+                        }
+                    }
+                }
+
+                public void onAudioPatchListUpdate(AudioPatch[] patchList) {
+                    Log.i(TAG, "onAudioPatchListUpdate");
+                    for(int i = 0; i < patchList.length; i++) {
+                        Log.d(TAG, "Patch List " + i +" : "+ patchList[i]);
+                    }
+                }
+
+                public void onServiceDied() {
+                    Log.i(TAG, " Service Died");
+                }
+            };
+
         @Override
         public void exit() {
             Log.d(TAG, "Exit Connected: " + getCurrentMessage().what);
@@ -2141,6 +2323,9 @@ final class HeadsetClientStateMachine extends StateMachine {
         @Override
         public void enter() {
             Log.d(TAG, "Enter AudioOn: " + getCurrentMessage().what);
+            mAudioManager.registerAudioPortUpdateListener(mConnected.mAudioPortListener);
+            mAudioManager.setStreamSolo(AudioManager.STREAM_BLUETOOTH_SCO, true);
+
             broadcastAudioState(mCurrentDevice, BluetoothHeadsetClient.STATE_AUDIO_CONNECTED,
                 BluetoothHeadsetClient.STATE_AUDIO_CONNECTING);
         }
@@ -2262,6 +2447,9 @@ final class HeadsetClientStateMachine extends StateMachine {
         @Override
         public void exit() {
             Log.d(TAG, "Exit AudioOn: " + getCurrentMessage().what);
+            mAudioManager.unregisterAudioPortUpdateListener(mConnected.mAudioPortListener);
+            mConnected.releaseAudioPatch();
+            mAudioManager.setStreamSolo(AudioManager.STREAM_BLUETOOTH_SCO, false);
         }
     }
 
