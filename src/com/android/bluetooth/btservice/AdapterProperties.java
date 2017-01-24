@@ -29,6 +29,7 @@ import android.util.Pair;
 import com.android.bluetooth.Utils;
 import com.android.bluetooth.btservice.RemoteDevices.DeviceProperties;
 
+import java.lang.System;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -38,7 +39,9 @@ class AdapterProperties {
     private static final boolean VDBG = false;
     private static final String TAG = "BluetoothAdapterProperties";
 
-    private static final int BD_ADDR_LEN = 6; // 6 bytes
+    private static final long DEFAULT_DISCOVERY_TIMEOUT_MS = 12800;
+    private static final int BD_ADDR_LEN = 6; // in bytes
+
     private volatile String mName;
     private volatile byte[] mAddress;
     private volatile int mBluetoothClass;
@@ -56,6 +59,7 @@ class AdapterProperties {
 
     private AdapterService mService;
     private boolean mDiscovering;
+    private long mDiscoveryEndMs; //< Time (ms since epoch) that discovery ended or will end.
     private RemoteDevices mRemoteDevices;
     private BluetoothAdapter mAdapter;
     //TODO - all hw capabilities to be exposed as a class
@@ -315,6 +319,10 @@ class AdapterProperties {
             if (p != null) return p.first;
             return BluetoothProfile.STATE_DISCONNECTED;
         }
+    }
+
+    long discoveryEndMillis() {
+        return mDiscoveryEndMs;
     }
 
     boolean isDiscovering() {
@@ -627,10 +635,12 @@ class AdapterProperties {
             Intent intent;
             if (state == AbstractionLayer.BT_DISCOVERY_STOPPED) {
                 mDiscovering = false;
+                mDiscoveryEndMs = System.currentTimeMillis();
                 intent = new Intent(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
                 mService.sendBroadcast(intent, mService.BLUETOOTH_PERM);
             } else if (state == AbstractionLayer.BT_DISCOVERY_STARTED) {
                 mDiscovering = true;
+                mDiscoveryEndMs = System.currentTimeMillis() + DEFAULT_DISCOVERY_TIMEOUT_MS;
                 intent = new Intent(BluetoothAdapter.ACTION_DISCOVERY_STARTED);
                 mService.sendBroadcast(intent, mService.BLUETOOTH_PERM);
             }

@@ -1039,6 +1039,7 @@ public class AdapterService extends Service {
             if (service == null) return false;
             return service.cancelDiscovery();
         }
+
         public boolean isDiscovering() {
             if (!Utils.checkCallerAllowManagedProfiles(mService)) {
                 Log.w(TAG, "isDiscovering() - Not allowed for non-active user");
@@ -1048,6 +1049,17 @@ public class AdapterService extends Service {
             AdapterService service = getService();
             if (service == null) return false;
             return service.isDiscovering();
+        }
+
+        public long getDiscoveryEndMillis() {
+            if (!Utils.checkCaller()) {
+                Log.w(TAG, "getDiscoveryEndMillis() - Not allowed for non-active user");
+                return -1;
+            }
+
+            AdapterService service = getService();
+            if (service == null) return -1;
+            return service.getDiscoveryEndMillis();
         }
 
         public BluetoothDevice[] getBondedDevices() {
@@ -1573,6 +1585,12 @@ public class AdapterService extends Service {
         enforceCallingOrSelfPermission(BLUETOOTH_PERM, "Need BLUETOOTH permission");
 
         return mAdapterProperties.isDiscovering();
+    }
+
+     long getDiscoveryEndMillis() {
+        enforceCallingOrSelfPermission(BLUETOOTH_PERM, "Need BLUETOOTH permission");
+
+        return mAdapterProperties.discoveryEndMillis();
     }
 
      BluetoothDevice[] getBondedDevices() {
