@@ -32,7 +32,7 @@
 
 package com.android.bluetooth.opp;
 
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
@@ -61,9 +61,9 @@ public class BluetoothOppPreference {
 
     private SharedPreferences mChannelPreference;
 
-    private HashMap<String, Integer> mChannels = new HashMap<String, Integer>();
+    private ConcurrentHashMap<String, Integer> mChannels = new ConcurrentHashMap<String, Integer>();
 
-    private HashMap<String, String> mNames = new HashMap<String, String>();
+    private ConcurrentHashMap<String, String> mNames = new ConcurrentHashMap<String, String>();
 
     public static BluetoothOppPreference getInstance(Context context) {
         synchronized (INSTANCE_LOCK) {
@@ -89,8 +89,8 @@ public class BluetoothOppPreference {
         mChannelPreference = mContext.getSharedPreferences(
                 Constants.BLUETOOTHOPP_CHANNEL_PREFERENCE, Context.MODE_PRIVATE);
 
-        mNames = (HashMap<String, String>) mNamePreference.getAll();
-        mChannels = (HashMap<String, Integer>) mChannelPreference.getAll();
+        mNames = (ConcurrentHashMap<String, String>) mNamePreference.getAll();
+        mChannels = (ConcurrentHashMap<String, Integer>) mChannelPreference.getAll();
 
         return true;
     }
